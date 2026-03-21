@@ -772,4 +772,3 @@ function toast(msg, type='success') {
 // ---- HELPERS ----
 function truncate(str, n) { return str.length>n ? str.slice(0,n)+'…' : str; }
 function dateStamp()      { return new Date().toLocaleDateString('en-ZA').replace(/\//g,'-'); }
-
