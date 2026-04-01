@@ -1,71 +1,51 @@
-class ScreenshotProcessor {
-    constructor() {
-        // Initialize any required libraries or settings here
-    }
+// Screenshot Processor using Tesseract.js
 
-    /**
-     * This method will process the screenshot and detect @mentions, postponements, no-shows, and scores.
-     * @param {string} imagePath - Path to the image to be processed.
-     * @returns {Object} - An object containing mentions, postponements, noShows, and scores.
-     */
-    processScreenshot(imagePath) {
-        // Implement the OCR processing logic here.
-        // For example, using Tesseract.js or any other OCR library
+import Tesseract from 'tesseract.js';
 
-        let ocrResult = this.performOCR(imagePath);
-        return this.extractInformation(ocrResult);
-    }
+// Function to process the screenshot and extract information
+async function processScreenshot(imagePath) {
+    try {
+        // Run OCR using Tesseract.js
+        const { data: { text } } = await Tesseract.recognize(
+            imagePath,
+            'eng',
+            { logger: info => console.log(info) }
+        );
 
-    /**
-     * Perform OCR on the given image.
-     * @param {string} imagePath - Path to the image.
-     * @returns {string} - The detected text from the image.
-     */
-    performOCR(imagePath) {
-        // This is a placeholder for the OCR logic.
-        // Implement your chosen OCR library function here
-        return "Detected text from image";
-    }
-
-    /**
-     * Extract mentions, postponements, no-shows, and scores from the detected text.
-     * @param {string} text - The text to analyze.
-     * @returns {Object} - An object containing mentions, postponements, noShows, and scores.
-     */
-    extractInformation(text) {
-        const mentions = this.detectMentions(text);
-        const postponements = this.detectPostponements(text);
-        const noShows = this.detectNoShows(text);
-        const scores = this.detectScores(text);
-
-        return {
-            mentions,
-            postponements,
-            noShows,
-            scores
-        };
-    }
-
-    detectMentions(text) {
-        // Logic to find @mentions in the text
-        return [...new Set((text.match(/@[\w]+/g) || []))];
-    }
-
-    detectPostponements(text) {
-        // Logic to identify postponements
-        return text.includes('postponed') ? ['Postponed'] : [];
-    }
-
-    detectNoShows(text) {
-        // Logic to identify no-shows
-        return text.includes('no-show') ? ['No Show'] : [];
-    }
-
-    detectScores(text) {
-        // Logic to extract game scores
-        const scorePattern = /\d+-\d+/g;
-        return text.match(scorePattern) || [];
+        // Log extracted text for debugging
+        console.log('Extracted Text:', text);
+        
+        // Analyze the text for player mentions and game status
+        detectPlayerMentionsAndStatus(text);
+    } catch (error) {
+        console.error('Error processing screenshot:', error);
     }
 }
 
-export default ScreenshotProcessor;
+// Function to detect player mentions, postponements, and no-shows
+function detectPlayerMentionsAndStatus(text) {
+    const playerMentions = /@(?:Tyron|Astral)/g;
+    const noShowPattern = /didn't show/i;
+
+    const players = text.match(playerMentions);
+    const noShow = noShowPattern.test(text);
+
+    // Logging the analysis
+    console.log('Players Mentioned:', players);
+    console.log('No-Show Detected:', noShow);
+
+    // Future implementation for pending analysis tracking and confirmation dialogs
+    // Audit logging can be added here
+
+    // Placeholder for keeping track of pending confirmations
+    trackPendingConfirms(players, noShow);
+}
+
+// Function to track pending confirmations
+function trackPendingConfirms(players, noShow) {
+    // Logic to handle pending confirmations and audit logging
+    console.log('Tracking Pending Confirmations:', { players, noShow });
+    // Example: Send notifications or update a database, etc.
+}
+
+export { processScreenshot };
