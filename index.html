@@ -397,6 +397,31 @@
 
             <div class="acc-item">
                 <button class="acc-trigger" onclick="toggleAcc(this)">
+                    <span class="acc-icon-wrap" style="background:rgba(139,92,246,0.12);border-color:rgba(139,92,246,0.35);color:#a78bfa;"><i class="fab fa-whatsapp"></i></span>
+                    <span class="acc-label">WhatsApp Chat OCR</span>
+                    <i class="fas fa-chevron-down acc-chevron"></i>
+                </button>
+                <div class="acc-body">
+                    <p class="acc-desc">Upload a WhatsApp chat screenshot to automatically detect postponements, no-shows, and match results.</p>
+                    <div style="background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.2);padding:12px;border-radius:8px;margin-bottom:12px;">
+                        <div style="font-size:0.8rem;color:var(--purple);font-weight:600;margin-bottom:6px;">What this detects:</div>
+                        <ul style="font-size:0.75rem;color:var(--muted);margin:0;padding-left:20px;line-height:1.6;">
+                            <li>Postponement requests (player names mentioned)</li>
+                            <li>No-shows: @Tyron /Astral + "opponent didn't show" → automatic 3-0 win</li>
+                            <li>Match results: screenshots with scores</li>
+                        </ul>
+                    </div>
+                    <input type="file" id="whatsappImageInput" accept="image/*" class="file-input">
+                    <label for="whatsappImageInput" class="btn-file-label"><i class="fab fa-whatsapp"></i> Upload WhatsApp Screenshot</label>
+                    <span id="whatsapp-file-chosen" style="display:block;font-size:0.78rem;color:var(--muted);margin:6px 0 10px;">No file chosen</span>
+                    <button class="btn-primary full-w" onclick="processWhatsAppOCR()" id="btn-process-whatsapp"><i class="fas fa-magic"></i> Process Screenshot</button>
+                    <div id="whatsapp-ocr-status" style="margin-top:12px;font-size:0.85rem;"></div>
+                    <div id="whatsapp-ocr-results" style="margin-top:12px;"></div>
+                </div>
+            </div>
+
+            <div class="acc-item">
+                <button class="acc-trigger" onclick="toggleAcc(this)">
                     <span class="acc-icon-wrap"><i class="fas fa-photo-film"></i></span>
                     <span class="acc-label">Match Evidence</span>
                     <i class="fas fa-chevron-down acc-chevron"></i>
