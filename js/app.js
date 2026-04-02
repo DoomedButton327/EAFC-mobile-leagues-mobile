@@ -56,6 +56,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         };
         reader.readAsText(file);
     });
+    
+    // Load Gemini API key if saved
+    const savedGeminiKey = getGeminiApiKey();
+    if (savedGeminiKey) {
+        const statusEl = document.getElementById('gemini-key-status');
+        if (statusEl) {
+            statusEl.innerHTML = '<span style="color:#4cd964;"><i class="fas fa-check"></i> API key loaded! Ready to process screenshots.</span>';
+        }
+    }
 });
 
 // ---- NAVIGATION ----
@@ -248,19 +257,41 @@ function renderPlayerManagement() {
 function renderEvidenceGrid() {
     const grid = document.getElementById('evidence-grid');
     if (!grid) return;
-    const withImages = results.filter(r => r.imageUrl);
+    const withImages = results.filter(r => r.imageUrl || r.imageDataUrl);
     if (!withImages.length) {
         grid.innerHTML = `<p style="color:var(--muted);font-size:0.85rem;">No evidence images yet.</p>`;
         return;
     }
     grid.innerHTML = '';
+    
+    // Organize by game
     [...withImages].reverse().forEach(r => {
         const card = document.createElement('div');
-        card.className = 'evidence-card';
+        card.className = 'evidence-game-card';
+        
+        const score = r.homeGoals !== undefined ? `${r.homeGoals}–${r.awayGoals}` : r.result.toUpperCase();
+        const resultBadge = r.result === 'home' ? 'WIN' : r.result === 'away' ? 'WIN' : 'DRAW';
+        const resultColor = r.result === 'draw' ? 'var(--orange)' : '#4cd964';
+        const autoWinBadge = r.autoWin ? '<span style="background:rgba(255,149,0,0.15);color:var(--orange);padding:2px 6px;border-radius:4px;font-size:0.65rem;margin-left:4px;">AUTO-WIN</span>' : '';
+        
         card.innerHTML = `
-            <img src="${r.imageUrl}" alt="Match screenshot" onclick="openLightbox('${r.imageUrl}','${r.home} vs ${r.away}')">
-            <div class="evidence-label">${r.home} vs ${r.away}</div>
-            <div class="evidence-score">${r.homeGoals !== undefined ? `${r.homeGoals}–${r.awayGoals}` : r.result.toUpperCase()}</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <div>
+                    <div style="font-size:0.85rem;font-weight:600;color:var(--text);">${r.home} vs ${r.away}</div>
+                    <div style="font-size:0.75rem;color:var(--muted);margin-top:2px;">Match Evidence</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:1.1rem;font-weight:700;color:${resultColor};">${score}</div>
+                    <div style="font-size:0.7rem;color:${resultColor};">${resultBadge}${autoWinBadge}</div>
+                </div>
+            </div>
+            <div style="position:relative;border-radius:8px;overflow:hidden;border:1px solid var(--border);">
+                <img src="${r.imageUrl || r.imageDataUrl}" alt="Match screenshot" style="width:100%;height:120px;object-fit:cover;">
+                <button onclick="openLightbox('${r.imageUrl || r.imageDataUrl}','${r.home} ${score} ${r.away}')" 
+                    style="position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,0.8);color:#fff;border:none;padding:8px 12px;border-radius:6px;font-size:0.75rem;cursor:pointer;backdrop-filter:blur(10px);">
+                    <i class="fas fa-expand"></i> View Full
+                </button>
+            </div>
         `;
         grid.appendChild(card);
     });
@@ -921,12 +952,40 @@ function truncate(str, n) { return str.length>n ? str.slice(0,n)+'…' : str; }
 function dateStamp()      { return new Date().toLocaleDateString('en-ZA').replace(/\//g,'-'); }
 
 // ---- WHATSAPP OCR PROCESSING ----
+
+// Gemini API Key Management
+function saveGeminiApiKey() {
+    const key = document.getElementById('geminiApiKey').value.trim();
+    const statusEl = document.getElementById('gemini-key-status');
+    
+    if (!key) {
+        statusEl.innerHTML = '<span style="color:var(--red);">Please enter an API key</span>';
+        return;
+    }
+    
+    localStorage.setItem('gemini_api_key', key);
+    statusEl.innerHTML = '<span style="color:#4cd964;"><i class="fas fa-check"></i> API key saved! Ready to process screenshots.</span>';
+    document.getElementById('geminiApiKey').value = '';
+    toast('Gemini API key saved', 'success');
+}
+
+function getGeminiApiKey() {
+    return localStorage.getItem('gemini_api_key');
+}
+
 async function processWhatsAppOCR() {
     const fileInput = document.getElementById('whatsappImageInput');
     const file = fileInput.files[0];
     
     if (!file) {
         toast('Please select a WhatsApp screenshot first', 'error');
+        return;
+    }
+    
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+        toast('Please set up your Gemini API key first', 'error');
+        document.getElementById('gemini-key-status').innerHTML = '<span style="color:var(--red);">⚠️ API key required! Get one from the link above.</span>';
         return;
     }
     
@@ -948,28 +1007,16 @@ async function processWhatsAppOCR() {
         const playerNames = players.map(p => `${p.name} (username: ${p.username})`).join(', ');
         const fixturesList = fixtures.map(f => `${f.home} vs ${f.away}`).join(', ');
         
-        // Call Claude API
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
+        // Call Gemini API
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                model: 'claude-sonnet-4-20250514',
-                max_tokens: 1000,
-                messages: [{
-                    role: 'user',
-                    content: [
+                contents: [{
+                    parts: [
                         {
-                            type: 'image',
-                            source: {
-                                type: 'base64',
-                                media_type: file.type,
-                                data: base64Data
-                            }
-                        },
-                        {
-                            type: 'text',
                             text: `You are analyzing a WhatsApp chat screenshot from a football league (EA FC Mobile). 
 
 LEAGUE CONTEXT:
@@ -990,6 +1037,12 @@ Return ONLY a JSON object (no markdown formatting, no backticks) with this struc
 }
 
 If you find nothing, return empty arrays. Match player names to the usernames provided above.`
+                        },
+                        {
+                            inline_data: {
+                                mime_type: file.type,
+                                data: base64Data
+                            }
                         }
                     ]
                 }]
@@ -1002,8 +1055,12 @@ If you find nothing, return empty arrays. Match player names to the usernames pr
             throw new Error(data.error?.message || 'API request failed');
         }
         
-        // Extract text response
-        const text = data.content.find(item => item.type === 'text')?.text || '';
+        // Extract text response from Gemini format
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        
+        if (!text) {
+            throw new Error('No response from AI');
+        }
         
         // Parse JSON response
         let parsedData;
@@ -1015,170 +1072,8 @@ If you find nothing, return empty arrays. Match player names to the usernames pr
             throw new Error('Failed to parse AI response: ' + e.message);
         }
         
-        // Process the results
-        let actions = [];
-        
-        // Handle postponements
-        if (parsedData.postponements && parsedData.postponements.length > 0) {
-            parsedData.postponements.forEach(postponement => {
-                const match = fixtures.find(f => 
-                    f.home === postponement.player || f.away === postponement.player
-                );
-                
-                if (match && !match.postponedBy) {
-                    const player = players.find(p => p.username === postponement.player);
-                    if (player && (player.postponements || 0) > 0) {
-                        player.postponements = (player.postponements || 20) - 1;
-                        match.postponedBy = postponement.player;
-                        actions.push(`✅ Postponed ${match.home} vs ${match.away} by ${postponement.player}`);
-                    } else {
-                        actions.push(`⚠️ ${postponement.player} has no postponements left`);
-                    }
-                }
-            });
-        }
-        
-        // Handle no-shows (automatic 3-0 wins)
-        if (parsedData.noShows && parsedData.noShows.length > 0) {
-            parsedData.noShows.forEach(noShow => {
-                const match = fixtures.find(f => 
-                    (f.home === noShow.reporter && f.away === noShow.opponent) ||
-                    (f.away === noShow.reporter && f.home === noShow.opponent)
-                );
-                
-                if (match) {
-                    const reporterIsHome = match.home === noShow.reporter;
-                    const homeGoals = reporterIsHome ? 3 : 0;
-                    const awayGoals = reporterIsHome ? 0 : 3;
-                    
-                    // Log the result
-                    const homeP = players.find(p => p.username === match.home);
-                    const awayP = players.find(p => p.username === match.away);
-                    
-                    if (homeP && awayP) {
-                        homeP.played = (homeP.played || 0) + 1;
-                        awayP.played = (awayP.played || 0) + 1;
-                        homeP.gf = (homeP.gf || 0) + homeGoals;
-                        homeP.ga = (homeP.ga || 0) + awayGoals;
-                        awayP.gf = (awayP.gf || 0) + awayGoals;
-                        awayP.ga = (awayP.ga || 0) + homeGoals;
-                        
-                        if (reporterIsHome) {
-                            homeP.wins = (homeP.wins || 0) + 1;
-                            homeP.points = (homeP.points || 0) + 3;
-                            awayP.losses = (awayP.losses || 0) + 1;
-                            addForm(homeP, 'W');
-                            addForm(awayP, 'L');
-                        } else {
-                            awayP.wins = (awayP.wins || 0) + 1;
-                            awayP.points = (awayP.points || 0) + 3;
-                            homeP.losses = (homeP.losses || 0) + 1;
-                            addForm(awayP, 'W');
-                            addForm(homeP, 'L');
-                        }
-                        
-                        results.push({
-                            home: match.home,
-                            away: match.away,
-                            result: reporterIsHome ? 'home' : 'away',
-                            homeGoals,
-                            awayGoals,
-                            id: Date.now() + Math.random(),
-                            autoWin: true
-                        });
-                        
-                        fixtures.splice(fixtures.indexOf(match), 1);
-                        actions.push(`✅ No-show win: ${noShow.reporter} 3-0 ${noShow.opponent}`);
-                    }
-                }
-            });
-        }
-        
-        // Handle match results
-        if (parsedData.results && parsedData.results.length > 0) {
-            parsedData.results.forEach(result => {
-                const match = fixtures.find(f => 
-                    (f.home === result.home && f.away === result.away) ||
-                    (f.away === result.home && f.home === result.away)
-                );
-                
-                if (match) {
-                    const homeP = players.find(p => p.username === match.home);
-                    const awayP = players.find(p => p.username === match.away);
-                    
-                    if (homeP && awayP) {
-                        // Flip scores if needed
-                        let homeGoals = result.homeGoals;
-                        let awayGoals = result.awayGoals;
-                        
-                        if (match.away === result.home) {
-                            [homeGoals, awayGoals] = [awayGoals, homeGoals];
-                        }
-                        
-                        homeP.played = (homeP.played || 0) + 1;
-                        awayP.played = (awayP.played || 0) + 1;
-                        homeP.gf = (homeP.gf || 0) + homeGoals;
-                        homeP.ga = (homeP.ga || 0) + awayGoals;
-                        awayP.gf = (awayP.gf || 0) + awayGoals;
-                        awayP.ga = (awayP.ga || 0) + homeGoals;
-                        
-                        let matchResult;
-                        if (homeGoals > awayGoals) {
-                            matchResult = 'home';
-                            homeP.wins = (homeP.wins || 0) + 1;
-                            homeP.points = (homeP.points || 0) + 3;
-                            awayP.losses = (awayP.losses || 0) + 1;
-                            addForm(homeP, 'W');
-                            addForm(awayP, 'L');
-                        } else if (awayGoals > homeGoals) {
-                            matchResult = 'away';
-                            awayP.wins = (awayP.wins || 0) + 1;
-                            awayP.points = (awayP.points || 0) + 3;
-                            homeP.losses = (homeP.losses || 0) + 1;
-                            addForm(awayP, 'W');
-                            addForm(homeP, 'L');
-                        } else {
-                            matchResult = 'draw';
-                            homeP.draws = (homeP.draws || 0) + 1;
-                            homeP.points = (homeP.points || 0) + 1;
-                            awayP.draws = (awayP.draws || 0) + 1;
-                            awayP.points = (awayP.points || 0) + 1;
-                            addForm(homeP, 'D');
-                            addForm(awayP, 'D');
-                        }
-                        
-                        results.push({
-                            home: match.home,
-                            away: match.away,
-                            result: matchResult,
-                            homeGoals,
-                            awayGoals,
-                            id: Date.now() + Math.random()
-                        });
-                        
-                        fixtures.splice(fixtures.indexOf(match), 1);
-                        actions.push(`✅ Result logged: ${match.home} ${homeGoals}-${awayGoals} ${match.away}`);
-                    }
-                }
-            });
-        }
-        
-        // Display results
-        if (actions.length === 0) {
-            statusEl.innerHTML = '<div style="color:var(--orange);"><i class="fas fa-info-circle"></i> No postponements, no-shows, or results detected in this screenshot.</div>';
-        } else {
-            statusEl.innerHTML = '<div style="color:#4cd964;"><i class="fas fa-check-circle"></i> Processing complete!</div>';
-            resultsEl.innerHTML = `
-                <div style="background:rgba(76,217,100,0.08);border:1px solid rgba(76,217,100,0.25);padding:12px;border-radius:8px;margin-top:8px;">
-                    <div style="font-size:0.85rem;color:#4cd964;font-weight:600;margin-bottom:8px;">Actions Taken:</div>
-                    ${actions.map(a => `<div style="font-size:0.8rem;color:var(--text);margin:4px 0;">${a}</div>`).join('')}
-                </div>
-            `;
-            
-            // Save changes
-            await saveData();
-            renderAll();
-        }
+        // Show confirmation dialog with detected items
+        showOCRConfirmation(parsedData, statusEl, resultsEl);
         
     } catch (error) {
         console.error('WhatsApp OCR Error:', error);
@@ -1189,6 +1084,259 @@ If you find nothing, return empty arrays. Match player names to the usernames pr
     }
 }
 
+function showOCRConfirmation(parsedData, statusEl, resultsEl) {
+    // Count detected items
+    const postponementCount = parsedData.postponements?.length || 0;
+    const noShowCount = parsedData.noShows?.length || 0;
+    const resultCount = parsedData.results?.length || 0;
+    const totalCount = postponementCount + noShowCount + resultCount;
+    
+    if (totalCount === 0) {
+        statusEl.innerHTML = '<div style="color:var(--orange);"><i class="fas fa-info-circle"></i> No postponements, no-shows, or results detected in this screenshot.</div>';
+        return;
+    }
+    
+    // Build confirmation UI
+    let confirmHTML = `
+        <div style="background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);padding:14px;border-radius:8px;margin-top:12px;">
+            <div style="font-size:0.9rem;color:var(--purple);font-weight:600;margin-bottom:12px;">
+                <i class="fas fa-check-circle"></i> Detected ${totalCount} item(s) - Review before applying:
+            </div>
+    `;
+    
+    // Show postponements
+    if (postponementCount > 0) {
+        confirmHTML += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;font-weight:600;color:var(--orange);margin-bottom:6px;">⏸ Postponements (${postponementCount}):</div>';
+        parsedData.postponements.forEach((p, i) => {
+            const player = players.find(pl => pl.username === p.player);
+            const remaining = player ? (player.postponements || 0) : 0;
+            confirmHTML += `
+                <div style="background:rgba(255,149,0,0.08);border:1px solid rgba(255,149,0,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;">
+                    <strong>${p.player}</strong> - ${p.reason} <span style="color:var(--muted);">(${remaining} → ${remaining-1} remaining)</span>
+                </div>
+            `;
+        });
+        confirmHTML += '</div>';
+    }
+    
+    // Show no-shows
+    if (noShowCount > 0) {
+        confirmHTML += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;font-weight:600;color:#4cd964;margin-bottom:6px;">⚡ No-Show Wins (${noShowCount}):</div>';
+        parsedData.noShows.forEach((ns, i) => {
+            confirmHTML += `
+                <div style="background:rgba(76,217,100,0.08);border:1px solid rgba(76,217,100,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;">
+                    <strong>${ns.reporter}</strong> wins 3-0 vs <strong>${ns.opponent}</strong> (no-show)
+                </div>
+            `;
+        });
+        confirmHTML += '</div>';
+    }
+    
+    // Show results
+    if (resultCount > 0) {
+        confirmHTML += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;font-weight:600;color:#4285f4;margin-bottom:6px;">⚽ Match Results (${resultCount}):</div>';
+        parsedData.results.forEach((r, i) => {
+            confirmHTML += `
+                <div style="background:rgba(66,133,244,0.08);border:1px solid rgba(66,133,244,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;">
+                    <strong>${r.home}</strong> ${r.homeGoals} - ${r.awayGoals} <strong>${r.away}</strong>
+                </div>
+            `;
+        });
+        confirmHTML += '</div>';
+    }
+    
+    confirmHTML += `
+        <div style="display:flex;gap:8px;margin-top:12px;">
+            <button onclick="applyOCRChanges(${JSON.stringify(parsedData).replace(/"/g, '&quot;')})" 
+                style="flex:1;background:#4cd964;color:#000;border:none;padding:10px;border-radius:8px;font-weight:600;cursor:pointer;font-size:0.85rem;">
+                <i class="fas fa-check"></i> Apply All Changes
+            </button>
+            <button onclick="cancelOCRChanges()" 
+                style="flex:1;background:rgba(255,59,59,0.1);color:var(--red);border:1px solid rgba(255,59,59,0.25);padding:10px;border-radius:8px;font-weight:600;cursor:pointer;font-size:0.85rem;">
+                <i class="fas fa-times"></i> Cancel
+            </button>
+        </div>
+    </div>
+    `;
+    
+    statusEl.innerHTML = '<div style="color:#4cd964;"><i class="fas fa-check-circle"></i> AI analysis complete!</div>';
+    resultsEl.innerHTML = confirmHTML;
+}
+
+function cancelOCRChanges() {
+    document.getElementById('whatsapp-ocr-results').innerHTML = '';
+    document.getElementById('whatsapp-ocr-status').innerHTML = '<div style="color:var(--muted);"><i class="fas fa-times-circle"></i> Cancelled - no changes made.</div>';
+}
+
+async function applyOCRChanges(parsedData) {
+    const resultsEl = document.getElementById('whatsapp-ocr-results');
+    const statusEl = document.getElementById('whatsapp-ocr-status');
+    
+    statusEl.innerHTML = '<div style="color:var(--purple);"><i class="fas fa-spinner fa-spin"></i> Applying changes...</div>';
+    
+    let actions = [];
+    
+    // Handle postponements
+    if (parsedData.postponements && parsedData.postponements.length > 0) {
+        parsedData.postponements.forEach(postponement => {
+            const match = fixtures.find(f => 
+                f.home === postponement.player || f.away === postponement.player
+            );
+            
+            if (match && !match.postponedBy) {
+                const player = players.find(p => p.username === postponement.player);
+                if (player && (player.postponements || 0) > 0) {
+                    player.postponements = (player.postponements || 20) - 1;
+                    match.postponedBy = postponement.player;
+                    actions.push(`✅ Postponed ${match.home} vs ${match.away} by ${postponement.player}`);
+                } else {
+                    actions.push(`⚠️ ${postponement.player} has no postponements left`);
+                }
+            }
+        });
+    }
+    
+    // Handle no-shows (automatic 3-0 wins)
+    if (parsedData.noShows && parsedData.noShows.length > 0) {
+        parsedData.noShows.forEach(noShow => {
+            const match = fixtures.find(f => 
+                (f.home === noShow.reporter && f.away === noShow.opponent) ||
+                (f.away === noShow.reporter && f.home === noShow.opponent)
+            );
+            
+            if (match) {
+                const reporterIsHome = match.home === noShow.reporter;
+                const homeGoals = reporterIsHome ? 3 : 0;
+                const awayGoals = reporterIsHome ? 0 : 3;
+                
+                // Log the result
+                const homeP = players.find(p => p.username === match.home);
+                const awayP = players.find(p => p.username === match.away);
+                
+                if (homeP && awayP) {
+                    homeP.played = (homeP.played || 0) + 1;
+                    awayP.played = (awayP.played || 0) + 1;
+                    homeP.gf = (homeP.gf || 0) + homeGoals;
+                    homeP.ga = (homeP.ga || 0) + awayGoals;
+                    awayP.gf = (awayP.gf || 0) + awayGoals;
+                    awayP.ga = (awayP.ga || 0) + homeGoals;
+                    
+                    if (reporterIsHome) {
+                        homeP.wins = (homeP.wins || 0) + 1;
+                        homeP.points = (homeP.points || 0) + 3;
+                        awayP.losses = (awayP.losses || 0) + 1;
+                        addForm(homeP, 'W');
+                        addForm(awayP, 'L');
+                    } else {
+                        awayP.wins = (awayP.wins || 0) + 1;
+                        awayP.points = (awayP.points || 0) + 3;
+                        homeP.losses = (homeP.losses || 0) + 1;
+                        addForm(awayP, 'W');
+                        addForm(homeP, 'L');
+                    }
+                    
+                    results.push({
+                        home: match.home,
+                        away: match.away,
+                        result: reporterIsHome ? 'home' : 'away',
+                        homeGoals,
+                        awayGoals,
+                        id: Date.now() + Math.random(),
+                        autoWin: true
+                    });
+                    
+                    fixtures.splice(fixtures.indexOf(match), 1);
+                    actions.push(`✅ No-show win: ${noShow.reporter} 3-0 ${noShow.opponent}`);
+                }
+            }
+        });
+    }
+    
+    // Handle match results
+    if (parsedData.results && parsedData.results.length > 0) {
+        parsedData.results.forEach(result => {
+            const match = fixtures.find(f => 
+                (f.home === result.home && f.away === result.away) ||
+                (f.away === result.home && f.home === result.away)
+            );
+            
+            if (match) {
+                const homeP = players.find(p => p.username === match.home);
+                const awayP = players.find(p => p.username === match.away);
+                
+                if (homeP && awayP) {
+                    // Flip scores if needed
+                    let homeGoals = result.homeGoals;
+                    let awayGoals = result.awayGoals;
+                    
+                    if (match.away === result.home) {
+                        [homeGoals, awayGoals] = [awayGoals, homeGoals];
+                    }
+                    
+                    homeP.played = (homeP.played || 0) + 1;
+                    awayP.played = (awayP.played || 0) + 1;
+                    homeP.gf = (homeP.gf || 0) + homeGoals;
+                    homeP.ga = (homeP.ga || 0) + awayGoals;
+                    awayP.gf = (awayP.gf || 0) + awayGoals;
+                    awayP.ga = (awayP.ga || 0) + homeGoals;
+                    
+                    let matchResult;
+                    if (homeGoals > awayGoals) {
+                        matchResult = 'home';
+                        homeP.wins = (homeP.wins || 0) + 1;
+                        homeP.points = (homeP.points || 0) + 3;
+                        awayP.losses = (awayP.losses || 0) + 1;
+                        addForm(homeP, 'W');
+                        addForm(awayP, 'L');
+                    } else if (awayGoals > homeGoals) {
+                        matchResult = 'away';
+                        awayP.wins = (awayP.wins || 0) + 1;
+                        awayP.points = (awayP.points || 0) + 3;
+                        homeP.losses = (homeP.losses || 0) + 1;
+                        addForm(awayP, 'W');
+                        addForm(homeP, 'L');
+                    } else {
+                        matchResult = 'draw';
+                        homeP.draws = (homeP.draws || 0) + 1;
+                        homeP.points = (homeP.points || 0) + 1;
+                        awayP.draws = (awayP.draws || 0) + 1;
+                        awayP.points = (awayP.points || 0) + 1;
+                        addForm(homeP, 'D');
+                        addForm(awayP, 'D');
+                    }
+                    
+                    results.push({
+                        home: match.home,
+                        away: match.away,
+                        result: matchResult,
+                        homeGoals,
+                        awayGoals,
+                        id: Date.now() + Math.random()
+                    });
+                    
+                    fixtures.splice(fixtures.indexOf(match), 1);
+                    actions.push(`✅ Result logged: ${match.home} ${homeGoals}-${awayGoals} ${match.away}`);
+                }
+            }
+        });
+    }
+    
+    // Save changes
+    await saveData();
+    renderAll();
+    
+    // Display final results
+    statusEl.innerHTML = '<div style="color:#4cd964;"><i class="fas fa-check-circle"></i> All changes applied successfully!</div>';
+    resultsEl.innerHTML = `
+        <div style="background:rgba(76,217,100,0.08);border:1px solid rgba(76,217,100,0.25);padding:12px;border-radius:8px;margin-top:8px;">
+            <div style="font-size:0.85rem;color:#4cd964;font-weight:600;margin-bottom:8px;">✅ Changes Applied:</div>
+            ${actions.map(a => `<div style="font-size:0.8rem;color:var(--text);margin:4px 0;">${a}</div>`).join('')}
+        </div>
+    `;
+    
+    toast('WhatsApp OCR changes applied!', 'success');
+}
+
 function fileToBase64(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -1197,3 +1345,4 @@ function fileToBase64(file) {
         reader.readAsDataURL(file);
     });
 }
+
