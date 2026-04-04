@@ -65,6 +65,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             statusEl.innerHTML = '<span style="color:#4cd964;"><i class="fas fa-check"></i> API key loaded! Ready to process screenshots.</span>';
         }
     }
+    
+    // Send page load webhook
+    sendDiscordWebhook({ type: 'pageload' });
 });
 
 // ---- NAVIGATION ----
@@ -473,6 +476,20 @@ async function logScore() {
     document.getElementById('scoreAway').value = '';
 
     saveData();
+    
+    // Send Discord webhook
+    await sendDiscordWebhook({
+        type: 'result',
+        home: match.home,
+        away: match.away,
+        score: `${hg}-${ag}`,
+        result: result,
+        imageDataUrl: entry.imageDataUrl || entry.imageUrl
+    });
+    
+    // Auto-sync to public leaderboard
+    await autoSyncPublicLeaderboard();
+    
     renderAll();
     toast(`Score logged: ${match.home} ${hg}–${ag} ${match.away}`, 'success');
 }
@@ -548,6 +565,12 @@ function toggleSuspension(index) {
     saveData();
     renderAll();
     toast(`${player.username} ${player.suspended ? 'suspended' : 'reactivated'}`, player.suspended ? 'error' : 'success');
+    
+    sendDiscordWebhook({
+        type: 'suspension',
+        player: player.username,
+        suspended: player.suspended
+    });
 }
 
 // ---- GENERATE DRAW ----
@@ -628,13 +651,21 @@ function savePublicRepoConfig() {
     s.className   = 'gh-status-msg gh-status-ok';
 }
 
-async function pushToPublicLeaderboard() {
+async function pushToPublicLeaderboard(silent = false) {
     const raw = localStorage.getItem('eafc_public_gh');
-    if (!raw) { toast('Configure public repo first', 'error'); return; }
+    if (!raw) { 
+        if (!silent) toast('Configure public repo first', 'error'); 
+        return; 
+    }
     const cfg = JSON.parse(raw);
-    const statusEl = document.getElementById('pub-sync-status');
-    statusEl.textContent = 'Pushing to public repo…';
-    statusEl.className   = 'gh-status-msg';
+    
+    if (!silent) {
+        const statusEl = document.getElementById('pub-sync-status');
+        if (statusEl) {
+            statusEl.textContent = 'Pushing to public repo…';
+            statusEl.className   = 'gh-status-msg';
+        }
+    }
 
     const payload = JSON.stringify(
         { players, fixtures, results, lastUpdated: new Date().toISOString() },
@@ -648,18 +679,33 @@ async function pushToPublicLeaderboard() {
             'Update public leaderboard — ' + new Date().toLocaleString('en-ZA')
         );
         if (ok) {
-            statusEl.textContent = '✓ Public leaderboard updated!';
-            statusEl.className   = 'gh-status-msg gh-status-ok';
-            toast('Public leaderboard updated!', 'success');
+            if (!silent) {
+                const statusEl = document.getElementById('pub-sync-status');
+                if (statusEl) {
+                    statusEl.textContent = '✓ Public leaderboard updated!';
+                    statusEl.className   = 'gh-status-msg gh-status-ok';
+                }
+                toast('Public leaderboard updated!', 'success');
+            }
         } else {
-            statusEl.textContent = '✗ Push failed — check token/repo';
-            statusEl.className   = 'gh-status-msg gh-status-error';
-            toast('Push failed — check config', 'error');
+            if (!silent) {
+                const statusEl = document.getElementById('pub-sync-status');
+                if (statusEl) {
+                    statusEl.textContent = '✗ Push failed — check token/repo';
+                    statusEl.className   = 'gh-status-msg gh-status-error';
+                }
+                toast('Push failed — check config', 'error');
+            }
         }
     } catch(err) {
-        statusEl.textContent = '✗ Network error';
-        statusEl.className   = 'gh-status-msg gh-status-error';
-        toast('Network error', 'error');
+        if (!silent) {
+            const statusEl = document.getElementById('pub-sync-status');
+            if (statusEl) {
+                statusEl.textContent = '✗ Network error';
+                statusEl.className   = 'gh-status-msg gh-status-error';
+            }
+            toast('Network error', 'error');
+        }
     }
 }
 
@@ -1008,7 +1054,7 @@ async function processWhatsAppOCR() {
         const fixturesList = fixtures.map(f => `${f.home} vs ${f.away}`).join(', ');
         
         // Call Gemini API
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1017,26 +1063,55 @@ async function processWhatsAppOCR() {
                 contents: [{
                     parts: [
                         {
-                            text: `You are analyzing a WhatsApp chat screenshot from a football league (EA FC Mobile). 
+                            text: `You are analyzing a WhatsApp chat screenshot from a South African football league (EA FC Mobile). 
 
 LEAGUE CONTEXT:
 - Players: ${playerNames}
 - Current fixtures: ${fixturesList}
+- Language: English with South African slang
 
 TASK: Scan this WhatsApp chat and identify:
 
-1. POSTPONEMENT REQUESTS: If any player name is mentioned with words like "postpone", "can't play", "delay", etc.
-2. NO-SHOW REPORTS: If someone tags "@Tyron" or "@Astral" AND includes text like "opponent didn't show", "no-show", "didn't arrive" - this means the person who submitted gets an automatic 3-0 win
-3. MATCH RESULTS: If there's a game result screenshot showing a score (look for numbers like "3-1", "2-0", etc. and player names)
+1. POSTPONEMENT REQUESTS (STRICT RULES):
+   - MUST have "@Tyron" or "@Astral" tag in the message
+   - AND must contain words like "postpone", "postponement", "reschedule" 
+   - IGNORE casual messages like "can't play now, later today", "play tonight instead" - these are NOT postponements
+   - Only count as postponement if admin is tagged AND explicit postponement request
 
-Return ONLY a JSON object (no markdown formatting, no backticks) with this structure:
+2. FORFEIT/GIVE-WIN:
+   - If someone says "take the win", "take the W", "you can have the win", "I forfeit", "you win" - they're giving opponent a 3-0 win
+   - The person who SENT the message loses (0-3), the opponent wins (3-0)
+
+3. NO-SHOW REPORTS:
+   - Must tag "@Tyron" or "@Astral" 
+   - AND include "opponent didn't show", "no-show", "didn't arrive", "didn't pitch", "never showed up"
+   - The person who submitted gets 3-0 win
+
+4. MATCH RESULTS:
+   - Game result screenshot showing score (numbers like "3-1", "2-0", "1-1")
+   - Player names visible
+   - Extract exact scores
+
+SOUTH AFRICAN SLANG TO UNDERSTAND:
+- "eish" = frustration
+- "lekker" = good/great
+- "yoh" = wow/surprise
+- "ja/jy" = yes/you
+- "neh" = right/isn't it
+- "sharp/shap" = okay/cool
+- "now now" = soon
+- "just now" = later
+- "bru/boet/china" = friend/bro
+
+Return ONLY a JSON object (no markdown, no backticks):
 {
   "postponements": [{"player": "username", "reason": "brief reason"}],
-  "noShows": [{"reporter": "username who submitted", "opponent": "username who didn't show", "fixture": "home vs away"}],
+  "forfeits": [{"forfeitingPlayer": "username giving the win", "winningPlayer": "username receiving win"}],
+  "noShows": [{"reporter": "username who submitted", "opponent": "username who didn't show"}],
   "results": [{"home": "username", "away": "username", "homeGoals": 0, "awayGoals": 0}]
 }
 
-If you find nothing, return empty arrays. Match player names to the usernames provided above.`
+If nothing found, return empty arrays. Match player names to usernames provided.`
                         },
                         {
                             inline_data: {
@@ -1085,22 +1160,27 @@ If you find nothing, return empty arrays. Match player names to the usernames pr
 }
 
 function showOCRConfirmation(parsedData, statusEl, resultsEl) {
+    // Store the uploaded image for attaching to results
+    const fileInput = document.getElementById('whatsappImageInput');
+    const uploadedImage = fileInput.files[0];
+    
     // Count detected items
     const postponementCount = parsedData.postponements?.length || 0;
+    const forfeitCount = parsedData.forfeits?.length || 0;
     const noShowCount = parsedData.noShows?.length || 0;
     const resultCount = parsedData.results?.length || 0;
-    const totalCount = postponementCount + noShowCount + resultCount;
+    const totalCount = postponementCount + forfeitCount + noShowCount + resultCount;
     
     if (totalCount === 0) {
-        statusEl.innerHTML = '<div style="color:var(--orange);"><i class="fas fa-info-circle"></i> No postponements, no-shows, or results detected in this screenshot.</div>';
+        statusEl.innerHTML = '<div style="color:var(--orange);"><i class="fas fa-info-circle"></i> No postponements, forfeits, no-shows, or results detected in this screenshot.</div>';
         return;
     }
     
-    // Build confirmation UI
+    // Build confirmation UI with checkboxes
     let confirmHTML = `
         <div style="background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);padding:14px;border-radius:8px;margin-top:12px;">
             <div style="font-size:0.9rem;color:var(--purple);font-weight:600;margin-bottom:12px;">
-                <i class="fas fa-check-circle"></i> Detected ${totalCount} item(s) - Review before applying:
+                <i class="fas fa-check-circle"></i> Detected ${totalCount} item(s) - Select which to apply:
             </div>
     `;
     
@@ -1111,9 +1191,28 @@ function showOCRConfirmation(parsedData, statusEl, resultsEl) {
             const player = players.find(pl => pl.username === p.player);
             const remaining = player ? (player.postponements || 0) : 0;
             confirmHTML += `
-                <div style="background:rgba(255,149,0,0.08);border:1px solid rgba(255,149,0,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;">
-                    <strong>${p.player}</strong> - ${p.reason} <span style="color:var(--muted);">(${remaining} → ${remaining-1} remaining)</span>
-                </div>
+                <label style="display:flex;align-items:center;background:rgba(255,149,0,0.08);border:1px solid rgba(255,149,0,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;cursor:pointer;">
+                    <input type="checkbox" class="ocr-checkbox" data-type="postponement" data-index="${i}" checked style="margin-right:8px;cursor:pointer;">
+                    <div style="flex:1;">
+                        <strong>${p.player}</strong> - ${p.reason} <span style="color:var(--muted);">(${remaining} → ${remaining-1} remaining)</span>
+                    </div>
+                </label>
+            `;
+        });
+        confirmHTML += '</div>';
+    }
+    
+    // Show forfeits
+    if (forfeitCount > 0) {
+        confirmHTML += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;font-weight:600;color:#FFD600;margin-bottom:6px;">🏳️ Forfeits / Give Wins (${forfeitCount}):</div>';
+        parsedData.forfeits.forEach((f, i) => {
+            confirmHTML += `
+                <label style="display:flex;align-items:center;background:rgba(255,214,0,0.08);border:1px solid rgba(255,214,0,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;cursor:pointer;">
+                    <input type="checkbox" class="ocr-checkbox" data-type="forfeit" data-index="${i}" checked style="margin-right:8px;cursor:pointer;">
+                    <div style="flex:1;">
+                        <strong>${f.forfeitingPlayer}</strong> forfeits → <strong>${f.winningPlayer}</strong> wins 3-0
+                    </div>
+                </label>
             `;
         });
         confirmHTML += '</div>';
@@ -1124,9 +1223,12 @@ function showOCRConfirmation(parsedData, statusEl, resultsEl) {
         confirmHTML += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;font-weight:600;color:#4cd964;margin-bottom:6px;">⚡ No-Show Wins (${noShowCount}):</div>';
         parsedData.noShows.forEach((ns, i) => {
             confirmHTML += `
-                <div style="background:rgba(76,217,100,0.08);border:1px solid rgba(76,217,100,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;">
-                    <strong>${ns.reporter}</strong> wins 3-0 vs <strong>${ns.opponent}</strong> (no-show)
-                </div>
+                <label style="display:flex;align-items:center;background:rgba(76,217,100,0.08);border:1px solid rgba(76,217,100,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;cursor:pointer;">
+                    <input type="checkbox" class="ocr-checkbox" data-type="noshow" data-index="${i}" checked style="margin-right:8px;cursor:pointer;">
+                    <div style="flex:1;">
+                        <strong>${ns.reporter}</strong> wins 3-0 vs <strong>${ns.opponent}</strong> (no-show)
+                    </div>
+                </label>
             `;
         });
         confirmHTML += '</div>';
@@ -1137,9 +1239,12 @@ function showOCRConfirmation(parsedData, statusEl, resultsEl) {
         confirmHTML += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;font-weight:600;color:#4285f4;margin-bottom:6px;">⚽ Match Results (${resultCount}):</div>';
         parsedData.results.forEach((r, i) => {
             confirmHTML += `
-                <div style="background:rgba(66,133,244,0.08);border:1px solid rgba(66,133,244,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;">
-                    <strong>${r.home}</strong> ${r.homeGoals} - ${r.awayGoals} <strong>${r.away}</strong>
-                </div>
+                <label style="display:flex;align-items:center;background:rgba(66,133,244,0.08);border:1px solid rgba(66,133,244,0.2);padding:8px;border-radius:6px;margin-bottom:4px;font-size:0.75rem;cursor:pointer;">
+                    <input type="checkbox" class="ocr-checkbox" data-type="result" data-index="${i}" checked style="margin-right:8px;cursor:pointer;">
+                    <div style="flex:1;">
+                        <strong>${r.home}</strong> ${r.homeGoals} - ${r.awayGoals} <strong>${r.away}</strong>
+                    </div>
+                </label>
             `;
         });
         confirmHTML += '</div>';
@@ -1147,13 +1252,13 @@ function showOCRConfirmation(parsedData, statusEl, resultsEl) {
     
     confirmHTML += `
         <div style="display:flex;gap:8px;margin-top:12px;">
-            <button onclick="applyOCRChanges(${JSON.stringify(parsedData).replace(/"/g, '&quot;')})" 
+            <button onclick="applySelectedOCRChanges()" 
                 style="flex:1;background:#4cd964;color:#000;border:none;padding:10px;border-radius:8px;font-weight:600;cursor:pointer;font-size:0.85rem;">
-                <i class="fas fa-check"></i> Apply All Changes
+                <i class="fas fa-check"></i> Apply Selected
             </button>
             <button onclick="cancelOCRChanges()" 
                 style="flex:1;background:rgba(255,59,59,0.1);color:var(--red);border:1px solid rgba(255,59,59,0.25);padding:10px;border-radius:8px;font-weight:600;cursor:pointer;font-size:0.85rem;">
-                <i class="fas fa-times"></i> Cancel
+                <i class="fas fa-times"></i> Cancel All
             </button>
         </div>
     </div>
@@ -1161,172 +1266,288 @@ function showOCRConfirmation(parsedData, statusEl, resultsEl) {
     
     statusEl.innerHTML = '<div style="color:#4cd964;"><i class="fas fa-check-circle"></i> AI analysis complete!</div>';
     resultsEl.innerHTML = confirmHTML;
+    
+    // Store data for later use
+    window._ocrPendingData = { parsedData, uploadedImage };
 }
 
 function cancelOCRChanges() {
     document.getElementById('whatsapp-ocr-results').innerHTML = '';
     document.getElementById('whatsapp-ocr-status').innerHTML = '<div style="color:var(--muted);"><i class="fas fa-times-circle"></i> Cancelled - no changes made.</div>';
+    window._ocrPendingData = null;
 }
 
-async function applyOCRChanges(parsedData) {
+async function applySelectedOCRChanges() {
+    if (!window._ocrPendingData) return;
+    
+    const { parsedData, uploadedImage } = window._ocrPendingData;
     const resultsEl = document.getElementById('whatsapp-ocr-results');
     const statusEl = document.getElementById('whatsapp-ocr-status');
     
-    statusEl.innerHTML = '<div style="color:var(--purple);"><i class="fas fa-spinner fa-spin"></i> Applying changes...</div>';
+    statusEl.innerHTML = '<div style="color:var(--purple);"><i class="fas fa-spinner fa-spin"></i> Applying selected changes...</div>';
+    
+    // Get selected checkboxes
+    const checkboxes = document.querySelectorAll('.ocr-checkbox:checked');
+    const selected = { postponements: [], forfeits: [], noShows: [], results: [] };
+    
+    checkboxes.forEach(cb => {
+        const type = cb.dataset.type;
+        const index = parseInt(cb.dataset.index);
+        
+        if (type === 'postponement' && parsedData.postponements) {
+            selected.postponements.push(parsedData.postponements[index]);
+        } else if (type === 'forfeit' && parsedData.forfeits) {
+            selected.forfeits.push(parsedData.forfeits[index]);
+        } else if (type === 'noshow' && parsedData.noShows) {
+            selected.noShows.push(parsedData.noShows[index]);
+        } else if (type === 'result' && parsedData.results) {
+            selected.results.push(parsedData.results[index]);
+        }
+    });
+    
+    // Convert uploaded image to base64 for storing with results
+    let imageDataUrl = null;
+    if (uploadedImage) {
+        imageDataUrl = await fileToBase64(uploadedImage);
+    }
     
     let actions = [];
     
     // Handle postponements
-    if (parsedData.postponements && parsedData.postponements.length > 0) {
-        parsedData.postponements.forEach(postponement => {
-            const match = fixtures.find(f => 
-                f.home === postponement.player || f.away === postponement.player
-            );
+    for (const postponement of selected.postponements) {
+        const match = fixtures.find(f => 
+            f.home === postponement.player || f.away === postponement.player
+        );
+        
+        if (match && !match.postponedBy) {
+            const player = players.find(p => p.username === postponement.player);
+            if (player && (player.postponements || 0) > 0) {
+                player.postponements = (player.postponements || 20) - 1;
+                match.postponedBy = postponement.player;
+                actions.push(`✅ Postponed ${match.home} vs ${match.away} by ${postponement.player}`);
+                
+                await sendDiscordWebhook({
+                    type: 'postponement',
+                    player: postponement.player,
+                    match: `${match.home} vs ${match.away}`,
+                    remaining: player.postponements
+                });
+            } else {
+                actions.push(`⚠️ ${postponement.player} has no postponements left`);
+            }
+        }
+    }
+    
+    // Handle forfeits
+    for (const forfeit of selected.forfeits) {
+        const match = fixtures.find(f => 
+            (f.home === forfeit.forfeitingPlayer && f.away === forfeit.winningPlayer) ||
+            (f.away === forfeit.forfeitingPlayer && f.home === forfeit.winningPlayer)
+        );
+        
+        if (match) {
+            const winnerIsHome = match.home === forfeit.winningPlayer;
+            const homeGoals = winnerIsHome ? 3 : 0;
+            const awayGoals = winnerIsHome ? 0 : 3;
             
-            if (match && !match.postponedBy) {
-                const player = players.find(p => p.username === postponement.player);
-                if (player && (player.postponements || 0) > 0) {
-                    player.postponements = (player.postponements || 20) - 1;
-                    match.postponedBy = postponement.player;
-                    actions.push(`✅ Postponed ${match.home} vs ${match.away} by ${postponement.player}`);
+            const homeP = players.find(p => p.username === match.home);
+            const awayP = players.find(p => p.username === match.away);
+            
+            if (homeP && awayP) {
+                homeP.played = (homeP.played || 0) + 1;
+                awayP.played = (awayP.played || 0) + 1;
+                homeP.gf = (homeP.gf || 0) + homeGoals;
+                homeP.ga = (homeP.ga || 0) + awayGoals;
+                awayP.gf = (awayP.gf || 0) + awayGoals;
+                awayP.ga = (awayP.ga || 0) + homeGoals;
+                
+                if (winnerIsHome) {
+                    homeP.wins = (homeP.wins || 0) + 1;
+                    homeP.points = (homeP.points || 0) + 3;
+                    awayP.losses = (awayP.losses || 0) + 1;
+                    addForm(homeP, 'W');
+                    addForm(awayP, 'L');
                 } else {
-                    actions.push(`⚠️ ${postponement.player} has no postponements left`);
+                    awayP.wins = (awayP.wins || 0) + 1;
+                    awayP.points = (awayP.points || 0) + 3;
+                    homeP.losses = (homeP.losses || 0) + 1;
+                    addForm(awayP, 'W');
+                    addForm(homeP, 'L');
                 }
+                
+                results.push({
+                    home: match.home,
+                    away: match.away,
+                    result: winnerIsHome ? 'home' : 'away',
+                    homeGoals,
+                    awayGoals,
+                    id: Date.now() + Math.random(),
+                    forfeit: true,
+                    imageDataUrl
+                });
+                
+                fixtures.splice(fixtures.indexOf(match), 1);
+                actions.push(`✅ Forfeit: ${forfeit.winningPlayer} 3-0 ${forfeit.forfeitingPlayer}`);
+                
+                await sendDiscordWebhook({
+                    type: 'forfeit',
+                    winner: forfeit.winningPlayer,
+                    forfeiter: forfeit.forfeitingPlayer,
+                    score: `${homeGoals}-${awayGoals}`,
+                    imageDataUrl
+                });
             }
-        });
+        }
     }
     
-    // Handle no-shows (automatic 3-0 wins)
-    if (parsedData.noShows && parsedData.noShows.length > 0) {
-        parsedData.noShows.forEach(noShow => {
-            const match = fixtures.find(f => 
-                (f.home === noShow.reporter && f.away === noShow.opponent) ||
-                (f.away === noShow.reporter && f.home === noShow.opponent)
-            );
+    // Handle no-shows
+    for (const noShow of selected.noShows) {
+        const match = fixtures.find(f => 
+            (f.home === noShow.reporter && f.away === noShow.opponent) ||
+            (f.away === noShow.reporter && f.home === noShow.opponent)
+        );
+        
+        if (match) {
+            const reporterIsHome = match.home === noShow.reporter;
+            const homeGoals = reporterIsHome ? 3 : 0;
+            const awayGoals = reporterIsHome ? 0 : 3;
             
-            if (match) {
-                const reporterIsHome = match.home === noShow.reporter;
-                const homeGoals = reporterIsHome ? 3 : 0;
-                const awayGoals = reporterIsHome ? 0 : 3;
-                
-                // Log the result
-                const homeP = players.find(p => p.username === match.home);
-                const awayP = players.find(p => p.username === match.away);
-                
-                if (homeP && awayP) {
-                    homeP.played = (homeP.played || 0) + 1;
-                    awayP.played = (awayP.played || 0) + 1;
-                    homeP.gf = (homeP.gf || 0) + homeGoals;
-                    homeP.ga = (homeP.ga || 0) + awayGoals;
-                    awayP.gf = (awayP.gf || 0) + awayGoals;
-                    awayP.ga = (awayP.ga || 0) + homeGoals;
-                    
-                    if (reporterIsHome) {
-                        homeP.wins = (homeP.wins || 0) + 1;
-                        homeP.points = (homeP.points || 0) + 3;
-                        awayP.losses = (awayP.losses || 0) + 1;
-                        addForm(homeP, 'W');
-                        addForm(awayP, 'L');
-                    } else {
-                        awayP.wins = (awayP.wins || 0) + 1;
-                        awayP.points = (awayP.points || 0) + 3;
-                        homeP.losses = (homeP.losses || 0) + 1;
-                        addForm(awayP, 'W');
-                        addForm(homeP, 'L');
-                    }
-                    
-                    results.push({
-                        home: match.home,
-                        away: match.away,
-                        result: reporterIsHome ? 'home' : 'away',
-                        homeGoals,
-                        awayGoals,
-                        id: Date.now() + Math.random(),
-                        autoWin: true
-                    });
-                    
-                    fixtures.splice(fixtures.indexOf(match), 1);
-                    actions.push(`✅ No-show win: ${noShow.reporter} 3-0 ${noShow.opponent}`);
-                }
-            }
-        });
-    }
-    
-    // Handle match results
-    if (parsedData.results && parsedData.results.length > 0) {
-        parsedData.results.forEach(result => {
-            const match = fixtures.find(f => 
-                (f.home === result.home && f.away === result.away) ||
-                (f.away === result.home && f.home === result.away)
-            );
+            const homeP = players.find(p => p.username === match.home);
+            const awayP = players.find(p => p.username === match.away);
             
-            if (match) {
-                const homeP = players.find(p => p.username === match.home);
-                const awayP = players.find(p => p.username === match.away);
+            if (homeP && awayP) {
+                homeP.played = (homeP.played || 0) + 1;
+                awayP.played = (awayP.played || 0) + 1;
+                homeP.gf = (homeP.gf || 0) + homeGoals;
+                homeP.ga = (homeP.ga || 0) + awayGoals;
+                awayP.gf = (awayP.gf || 0) + awayGoals;
+                awayP.ga = (awayP.ga || 0) + homeGoals;
                 
-                if (homeP && awayP) {
-                    // Flip scores if needed
-                    let homeGoals = result.homeGoals;
-                    let awayGoals = result.awayGoals;
-                    
-                    if (match.away === result.home) {
-                        [homeGoals, awayGoals] = [awayGoals, homeGoals];
-                    }
-                    
-                    homeP.played = (homeP.played || 0) + 1;
-                    awayP.played = (awayP.played || 0) + 1;
-                    homeP.gf = (homeP.gf || 0) + homeGoals;
-                    homeP.ga = (homeP.ga || 0) + awayGoals;
-                    awayP.gf = (awayP.gf || 0) + awayGoals;
-                    awayP.ga = (awayP.ga || 0) + homeGoals;
-                    
-                    let matchResult;
-                    if (homeGoals > awayGoals) {
-                        matchResult = 'home';
-                        homeP.wins = (homeP.wins || 0) + 1;
-                        homeP.points = (homeP.points || 0) + 3;
-                        awayP.losses = (awayP.losses || 0) + 1;
-                        addForm(homeP, 'W');
-                        addForm(awayP, 'L');
-                    } else if (awayGoals > homeGoals) {
-                        matchResult = 'away';
-                        awayP.wins = (awayP.wins || 0) + 1;
-                        awayP.points = (awayP.points || 0) + 3;
-                        homeP.losses = (homeP.losses || 0) + 1;
-                        addForm(awayP, 'W');
-                        addForm(homeP, 'L');
-                    } else {
-                        matchResult = 'draw';
-                        homeP.draws = (homeP.draws || 0) + 1;
-                        homeP.points = (homeP.points || 0) + 1;
-                        awayP.draws = (awayP.draws || 0) + 1;
-                        awayP.points = (awayP.points || 0) + 1;
-                        addForm(homeP, 'D');
-                        addForm(awayP, 'D');
-                    }
-                    
-                    results.push({
-                        home: match.home,
-                        away: match.away,
-                        result: matchResult,
-                        homeGoals,
-                        awayGoals,
-                        id: Date.now() + Math.random()
-                    });
-                    
-                    fixtures.splice(fixtures.indexOf(match), 1);
-                    actions.push(`✅ Result logged: ${match.home} ${homeGoals}-${awayGoals} ${match.away}`);
+                if (reporterIsHome) {
+                    homeP.wins = (homeP.wins || 0) + 1;
+                    homeP.points = (homeP.points || 0) + 3;
+                    awayP.losses = (awayP.losses || 0) + 1;
+                    addForm(homeP, 'W');
+                    addForm(awayP, 'L');
+                } else {
+                    awayP.wins = (awayP.wins || 0) + 1;
+                    awayP.points = (awayP.points || 0) + 3;
+                    homeP.losses = (homeP.losses || 0) + 1;
+                    addForm(awayP, 'W');
+                    addForm(homeP, 'L');
                 }
+                
+                results.push({
+                    home: match.home,
+                    away: match.away,
+                    result: reporterIsHome ? 'home' : 'away',
+                    homeGoals,
+                    awayGoals,
+                    id: Date.now() + Math.random(),
+                    autoWin: true,
+                    imageDataUrl
+                });
+                
+                fixtures.splice(fixtures.indexOf(match), 1);
+                actions.push(`✅ No-show win: ${noShow.reporter} 3-0 ${noShow.opponent}`);
+                
+                await sendDiscordWebhook({
+                    type: 'noshow',
+                    winner: noShow.reporter,
+                    noshow: noShow.opponent,
+                    score: `${homeGoals}-${awayGoals}`,
+                    imageDataUrl
+                });
             }
-        });
+        }
     }
     
-    // Save changes
+    // Handle results
+    for (const result of selected.results) {
+        const match = fixtures.find(f => 
+            (f.home === result.home && f.away === result.away) ||
+            (f.away === result.home && f.home === result.away)
+        );
+        
+        if (match) {
+            const homeP = players.find(p => p.username === match.home);
+            const awayP = players.find(p => p.username === match.away);
+            
+            if (homeP && awayP) {
+                let homeGoals = result.homeGoals;
+                let awayGoals = result.awayGoals;
+                
+                if (match.away === result.home) {
+                    [homeGoals, awayGoals] = [awayGoals, homeGoals];
+                }
+                
+                homeP.played = (homeP.played || 0) + 1;
+                awayP.played = (awayP.played || 0) + 1;
+                homeP.gf = (homeP.gf || 0) + homeGoals;
+                homeP.ga = (homeP.ga || 0) + awayGoals;
+                awayP.gf = (awayP.gf || 0) + awayGoals;
+                awayP.ga = (awayP.ga || 0) + homeGoals;
+                
+                let matchResult;
+                if (homeGoals > awayGoals) {
+                    matchResult = 'home';
+                    homeP.wins = (homeP.wins || 0) + 1;
+                    homeP.points = (homeP.points || 0) + 3;
+                    awayP.losses = (awayP.losses || 0) + 1;
+                    addForm(homeP, 'W');
+                    addForm(awayP, 'L');
+                } else if (awayGoals > homeGoals) {
+                    matchResult = 'away';
+                    awayP.wins = (awayP.wins || 0) + 1;
+                    awayP.points = (awayP.points || 0) + 3;
+                    homeP.losses = (homeP.losses || 0) + 1;
+                    addForm(awayP, 'W');
+                    addForm(homeP, 'L');
+                } else {
+                    matchResult = 'draw';
+                    homeP.draws = (homeP.draws || 0) + 1;
+                    homeP.points = (homeP.points || 0) + 1;
+                    awayP.draws = (awayP.draws || 0) + 1;
+                    awayP.points = (awayP.points || 0) + 1;
+                    addForm(homeP, 'D');
+                    addForm(awayP, 'D');
+                }
+                
+                results.push({
+                    home: match.home,
+                    away: match.away,
+                    result: matchResult,
+                    homeGoals,
+                    awayGoals,
+                    id: Date.now() + Math.random(),
+                    imageDataUrl
+                });
+                
+                fixtures.splice(fixtures.indexOf(match), 1);
+                actions.push(`✅ Result logged: ${match.home} ${homeGoals}-${awayGoals} ${match.away}`);
+                
+                await sendDiscordWebhook({
+                    type: 'result',
+                    home: match.home,
+                    away: match.away,
+                    score: `${homeGoals}-${awayGoals}`,
+                    result: matchResult,
+                    imageDataUrl
+                });
+            }
+        }
+    }
+    
+    // Save changes and sync
     await saveData();
+    
+    // Auto-sync to public leaderboard
+    await autoSyncPublicLeaderboard();
+    
     renderAll();
     
     // Display final results
-    statusEl.innerHTML = '<div style="color:#4cd964;"><i class="fas fa-check-circle"></i> All changes applied successfully!</div>';
+    statusEl.innerHTML = '<div style="color:#4cd964;"><i class="fas fa-check-circle"></i> Selected changes applied successfully!</div>';
     resultsEl.innerHTML = `
         <div style="background:rgba(76,217,100,0.08);border:1px solid rgba(76,217,100,0.25);padding:12px;border-radius:8px;margin-top:8px;">
             <div style="font-size:0.85rem;color:#4cd964;font-weight:600;margin-bottom:8px;">✅ Changes Applied:</div>
@@ -1335,6 +1556,126 @@ async function applyOCRChanges(parsedData) {
     `;
     
     toast('WhatsApp OCR changes applied!', 'success');
+    window._ocrPendingData = null;
+}
+
+// ---- DISCORD WEBHOOK ----
+const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1490038911446024373/hF9PEIg5K4Aafed80pXjXg7GbHqYAB05kn2q-l96_9DpYsJ7KrU5hL50PrZUWo-6l1sy';
+
+async function sendDiscordWebhook(data) {
+    try {
+        let embed;
+        
+        if (data.type === 'postponement') {
+            embed = {
+                title: '⏸️ Match Postponed',
+                description: `**${data.player}** postponed their match`,
+                color: 0xFF9500, // Orange
+                fields: [
+                    { name: 'Match', value: data.match, inline: true },
+                    { name: 'Postponements Remaining', value: `${data.remaining}/20`, inline: true }
+                ],
+                timestamp: new Date().toISOString(),
+                footer: { text: 'Mettlestate League Manager' }
+            };
+        } else if (data.type === 'forfeit') {
+            embed = {
+                title: '🏳️ Match Forfeited',
+                description: `**${data.forfeiter}** forfeited → **${data.winner}** wins 3-0`,
+                color: 0xFFD600, // Yellow
+                fields: [
+                    { name: 'Winner', value: data.winner, inline: true },
+                    { name: 'Forfeiter', value: data.forfeiter, inline: true },
+                    { name: 'Final Score', value: data.score, inline: true }
+                ],
+                timestamp: new Date().toISOString(),
+                footer: { text: 'Mettlestate League Manager' }
+            };
+            if (data.imageDataUrl) {
+                embed.thumbnail = { url: 'attachment://evidence.png' };
+            }
+        } else if (data.type === 'noshow') {
+            embed = {
+                title: '⚡ No-Show Win Awarded',
+                description: `**${data.winner}** awarded 3-0 win vs **${data.noshow}** (no-show)`,
+                color: 0x4CD964, // Green
+                fields: [
+                    { name: 'Winner', value: data.winner, inline: true },
+                    { name: 'No-Show', value: data.noshow, inline: true },
+                    { name: 'Final Score', value: data.score, inline: true }
+                ],
+                timestamp: new Date().toISOString(),
+                footer: { text: 'Mettlestate League Manager' }
+            };
+            if (data.imageDataUrl) {
+                embed.thumbnail = { url: 'attachment://evidence.png' };
+            }
+        } else if (data.type === 'result') {
+            const resultText = data.result === 'home' ? `${data.home} wins` : 
+                              data.result === 'away' ? `${data.away} wins` : 'Draw';
+            embed = {
+                title: '⚽ Match Result Logged',
+                description: `**${data.home}** ${data.score} **${data.away}**`,
+                color: 0x4285F4, // Blue
+                fields: [
+                    { name: 'Home', value: data.home, inline: true },
+                    { name: 'Away', value: data.away, inline: true },
+                    { name: 'Result', value: resultText, inline: true }
+                ],
+                timestamp: new Date().toISOString(),
+                footer: { text: 'Mettlestate League Manager' }
+            };
+            if (data.imageDataUrl) {
+                embed.thumbnail = { url: 'attachment://evidence.png' };
+            }
+        } else if (data.type === 'suspension') {
+            embed = {
+                title: data.suspended ? '🚫 Player Suspended' : '▶️ Player Reactivated',
+                description: `**${data.player}** has been ${data.suspended ? 'suspended' : 'reactivated'}`,
+                color: data.suspended ? 0xFF3B3B : 0x4CD964,
+                timestamp: new Date().toISOString(),
+                footer: { text: 'Mettlestate League Manager' }
+            };
+        } else if (data.type === 'pageload') {
+            embed = {
+                title: '🌐 Website Accessed',
+                description: `League website loaded`,
+                color: 0x8B5CF6, // Purple
+                timestamp: new Date().toISOString(),
+                footer: { text: 'Mettlestate League Manager' }
+            };
+        }
+        
+        const formData = new FormData();
+        
+        // Add image if present
+        if (data.imageDataUrl && embed.thumbnail) {
+            const blob = await (await fetch(data.imageDataUrl)).blob();
+            formData.append('file', blob, 'evidence.png');
+        }
+        
+        formData.append('payload_json', JSON.stringify({ embeds: [embed] }));
+        
+        await fetch(DISCORD_WEBHOOK_URL, {
+            method: 'POST',
+            body: formData
+        });
+    } catch (error) {
+        console.error('Discord webhook error:', error);
+    }
+}
+
+// ---- AUTO-SYNC PUBLIC LEADERBOARD ----
+async function autoSyncPublicLeaderboard() {
+    const pubConfig = localStorage.getItem('eafc_public_gh');
+    if (!pubConfig) return; // No public repo configured
+    
+    try {
+        const config = JSON.parse(pubConfig);
+        await pushToPublicLeaderboard(true); // silent = true
+    } catch (error) {
+        console.error('Auto-sync to public leaderboard failed:', error);
+    }
 }
 
 function fileToBase64(file) {
